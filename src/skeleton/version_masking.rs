@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::ParsedManifest;
 
 /// All local dependencies are emptied out when running `prepare`.
@@ -8,10 +10,11 @@ use super::ParsedManifest;
 /// We replace versions of local crates in `Cargo.lock` and in all `Cargo.toml`s, including
 /// when specified as dependency of another crate in the workspace.
 pub(super) fn mask_local_crate_versions(
+    member: &Option<String>,
     manifests: &mut [ParsedManifest],
     lock_file: &mut Option<toml::Value>,
 ) {
-    let local_package_names = parse_local_crate_names(manifests);
+    let local_package_names = parse_local_crate_names(member, manifests);
     mask_local_versions_in_manifests(manifests, &local_package_names);
     if let Some(l) = lock_file {
         mask_local_versions_in_lockfile(l, &local_package_names);
@@ -23,7 +26,7 @@ const CONST_VERSION: &str = "0.0.1";
 
 fn mask_local_versions_in_lockfile(
     lock_file: &mut toml::Value,
-    local_package_names: &[toml::Value],
+    local_package_names: &HashSet<String>,
 ) {
     if let Some(packages) = lock_file
         .get_mut("package")
@@ -35,7 +38,13 @@ fn mask_local_versions_in_lockfile(
             .filter(|package| {
                 package
                     .get("name")
-                    .map(|name| local_package_names.contains(name))
+                    .map(|name| {
+                        if let toml::Value::String(name) = name {
+                            local_package_names.contains(name)
+                        } else {
+                            false
+                        }
+                    })
                     .unwrap_or_default()
             })
             // Mask the version
@@ -49,7 +58,7 @@ fn mask_local_versions_in_lockfile(
 
 fn mask_local_versions_in_manifests(
     manifests: &mut [ParsedManifest],
-    local_package_names: &[toml::Value],
+    local_package_names: &HashSet<String>,
 ) {
     for manifest in manifests.iter_mut() {
         if let Some(package) = manifest.contents.get_mut("package") {
@@ -64,18 +73,16 @@ fn mask_local_versions_in_manifests(
 }
 
 fn mask_local_dependency_versions(
-    local_package_names: &[toml::Value],
+    local_package_names: &HashSet<String>,
     manifest: &mut ParsedManifest,
 ) {
-    fn _mask(local_package_names: &[toml::Value], toml_value: &mut toml::Value) {
+    fn _mask(local_package_names: &HashSet<String>, toml_value: &mut toml::Value) {
         for dependency_key in ["dependencies", "dev-dependencies", "build-dependencies"] {
             if let Some(dependencies) = toml_value.get_mut(dependency_key) {
                 for local_package in local_package_names.iter() {
-                    if let toml::Value::String(local_package) = local_package {
-                        if let Some(local_dependency) = dependencies.get_mut(local_package) {
-                            if let Some(version) = local_dependency.get_mut("version") {
-                                *version = toml::Value::String(CONST_VERSION.to_string());
-                            }
+                    if let Some(local_dependency) = dependencies.get_mut(local_package) {
+                        if let Some(version) = local_dependency.get_mut("version") {
+                            *version = toml::Value::String(CONST_VERSION.to_string());
                         }
                     }
                 }
@@ -127,12 +134,39 @@ fn mask_local_dependency_versions(
     }
 }
 
-fn parse_local_crate_names(manifests: &[ParsedManifest]) -> Vec<toml::Value> {
-    let mut local_package_names = vec![];
+fn parse_local_crate_names(
+    member: &Option<String>,
+    manifests: &[ParsedManifest],
+) -> HashSet<String> {
+    let mut local_package_names = HashSet::new();
     for manifest in manifests.iter() {
         if let Some(package) = manifest.contents.get("package") {
             if let Some(name) = package.get("name") {
-                local_package_names.push(name.to_owned());
+                if let toml::Value::String(name) = name {
+                    if let Some(member) = member {
+                        if member != name {
+                            // just evaluate the selected package for local dependencies if user specifed --bin option
+                            continue;
+                        }
+                        // evaluate the dependencies sections and extract local path dependencies
+                        for dependency_key in
+                            ["dependencies", "dev-dependencies", "build-dependencies"]
+                        {
+                            if let Some(dependencies) = manifest.contents.get(dependency_key) {
+                                if let toml::Value::Table(dependencies) = dependencies {
+                                    for (key, value) in dependencies.iter() {
+                                        // local dependencies have a path
+                                        if let Some(_) = value.get("path") {
+                                            local_package_names.insert(key.to_owned());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        local_package_names.insert(name.to_owned());
+                    }
+                }
             }
         }
     }

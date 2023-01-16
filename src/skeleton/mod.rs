@@ -36,13 +36,13 @@ impl Skeleton {
         // Read relevant files from the filesystem
         let config_file = read::config(&base_path)?;
         let mut manifests = read::manifests(&base_path, config_file.as_deref())?;
-        if let Some(member) = member {
+        if let Some(member) = member.to_owned() {
             ignore_all_members_except(&mut manifests, member);
         }
 
         let mut lock_file = read::lockfile(&base_path)?;
 
-        version_masking::mask_local_crate_versions(&mut manifests, &mut lock_file);
+        version_masking::mask_local_crate_versions(&member, &mut manifests, &mut lock_file);
 
         let lock_file = lock_file.map(|l| toml::to_string(&l)).transpose()?;
 
